@@ -8,11 +8,15 @@ from amplifier_core import ToolResult
 from .client import ComfyUIClient
 from .models import GenerationRequest, WorkflowType
 from .workflows import (
+    ControlNetWorkflow,
     Img2ImgWorkflow,
+    InpaintWorkflow,
     IPAdapterWorkflow,
+    OutpaintWorkflow,
     SDXLWorkflow,
     Txt2ImgLoRAWorkflow,
     Txt2ImgWorkflow,
+    UpscaleESRGANWorkflow,
     UpscaleWorkflow,
 )
 
@@ -54,6 +58,10 @@ class ComfyUITool:
         self._txt2img_lora = Txt2ImgLoRAWorkflow()
         self._img2img = Img2ImgWorkflow()
         self._upscale = UpscaleWorkflow()
+        self._upscale_esrgan = UpscaleESRGANWorkflow()
+        self._inpaint = InpaintWorkflow()
+        self._outpaint = OutpaintWorkflow()
+        self._controlnet = ControlNetWorkflow()
         self._sdxl = SDXLWorkflow()
         self._ip_adapter = IPAdapterWorkflow()
 
@@ -68,7 +76,11 @@ class ComfyUITool:
 Workflow types:
 - txt2img: Generate images from text descriptions
 - img2img: Transform existing images based on prompts  
-- upscale: Upscale images with optional refinement
+- upscale: Upscale images with latent refinement (adds detail via diffusion)
+- upscale_esrgan: AI upscale using Real-ESRGAN (fast, no diffusion, good for print)
+- inpaint: Fill masked areas of an image (for cutouts, object removal)
+- outpaint: Extend images beyond their borders (for larger print sizes)
+- controlnet: Structure-guided generation using edge/depth/line control images
 - sdxl: High-quality generation at 1024x1024 using SDXL models
 - ip_adapter: Use reference images to guide style/subject
 
@@ -148,8 +160,35 @@ Examples:
                 "workflow": {
                     "type": "string",
                     "description": "Workflow type",
-                    "enum": ["txt2img", "img2img", "upscale", "sdxl", "ip_adapter"],
+                    "enum": ["txt2img", "img2img", "upscale", "upscale_esrgan", "inpaint", "outpaint", "controlnet", "sdxl", "ip_adapter"],
                     "default": "txt2img",
+                },
+                "upscaler_model": {
+                    "type": "string",
+                    "description": "Upscaler model for ESRGAN (RealESRGAN_x4plus.pth or RealESRGAN_x4plus_anime_6B.pth)",
+                    "default": "RealESRGAN_x4plus.pth",
+                },
+                "mask_image": {
+                    "type": "string",
+                    "description": "Base64 encoded mask image for inpainting (white=generate, black=preserve)",
+                },
+                # ControlNet parameters
+                "control_image": {
+                    "type": "string",
+                    "description": "Base64 encoded control image for ControlNet (edges/depth/lines)",
+                },
+                "control_type": {
+                    "type": "string",
+                    "description": "ControlNet type",
+                    "enum": ["canny", "depth", "lineart"],
+                    "default": "canny",
+                },
+                "controlnet_strength": {
+                    "type": "number",
+                    "description": "How strongly to follow control image",
+                    "default": 1.0,
+                    "minimum": 0.0,
+                    "maximum": 2.0,
                 },
                 "input_image": {
                     "type": "string",
@@ -265,9 +304,10 @@ Examples:
                     },
                 )
 
-            # Handle input image for img2img/upscale
+            # Handle input image for img2img/upscale/inpaint workflows
             input_image_name = None
-            if request.workflow in (WorkflowType.IMG2IMG, WorkflowType.UPSCALE):
+            mask_image_name = None
+            if request.workflow in (WorkflowType.IMG2IMG, WorkflowType.UPSCALE, WorkflowType.UPSCALE_ESRGAN, WorkflowType.INPAINT, WorkflowType.OUTPAINT):
                 if not request.input_image:
                     return ToolResult(
                         success=False,
@@ -277,6 +317,31 @@ Examples:
                         },
                     )
                 input_image_name = await self._upload_input_image(request.input_image)
+                
+                # Upload mask image for inpainting/outpainting
+                if request.workflow in (WorkflowType.INPAINT, WorkflowType.OUTPAINT):
+                    if not request.mask_image:
+                        return ToolResult(
+                            success=False,
+                            error={
+                                "message": f"mask_image is required for {request.workflow.value} workflow",
+                                "type": "ValidationError",
+                            },
+                        )
+                    mask_image_name = await self._upload_input_image(request.mask_image)
+
+            # Handle control image for ControlNet
+            control_image_name = None
+            if request.workflow == WorkflowType.CONTROLNET:
+                if not request.control_image:
+                    return ToolResult(
+                        success=False,
+                        error={
+                            "message": "control_image is required for controlnet workflow",
+                            "type": "ValidationError",
+                        },
+                    )
+                control_image_name = await self._upload_input_image(request.control_image)
 
             # Handle reference image for IP-Adapter
             reference_image_name = None
@@ -295,7 +360,7 @@ Examples:
 
             # Build workflow
             workflow = self._build_workflow(
-                request, model, input_image_name, reference_image_name
+                request, model, input_image_name, reference_image_name, mask_image_name, control_image_name
             )
 
             # Execute generation
@@ -398,6 +463,14 @@ Examples:
                 "clip_vision_model", "CLIP-ViT-H-14-laion2B-s32B-b79K.safetensors"
             ),
             ip_adapter_weight=input.get("ip_adapter_weight", 1.0),
+            # Upscaler parameters
+            upscaler_model=input.get("upscaler_model", "RealESRGAN_x4plus.pth"),
+            # Inpainting parameters
+            mask_image=input.get("mask_image"),
+            # ControlNet parameters
+            control_image=input.get("control_image"),
+            control_type=input.get("control_type", "canny"),
+            controlnet_strength=input.get("controlnet_strength", 1.0),
         )
 
     async def _resolve_model(self, requested_model: str | None) -> str | None:
@@ -430,6 +503,8 @@ Examples:
         model: str,
         input_image_name: str | None,
         reference_image_name: str | None = None,
+        mask_image_name: str | None = None,
+        control_image_name: str | None = None,
     ) -> dict[str, Any]:
         """Build the appropriate workflow based on request."""
         common_params = {
@@ -480,6 +555,40 @@ Examples:
             return self._upscale.build(
                 input_image_name=input_image_name,
                 denoise=request.denoise,
+                **common_params,
+            )
+        elif request.workflow == WorkflowType.UPSCALE_ESRGAN:
+            assert input_image_name is not None
+            workflow = self._upscale_esrgan.build(
+                model_name=request.upscaler_model,
+            )
+            # Set the input image in the workflow
+            workflow["1"]["inputs"]["image"] = input_image_name
+            return workflow
+        elif request.workflow == WorkflowType.INPAINT:
+            assert input_image_name is not None
+            assert mask_image_name is not None
+            return self._inpaint.build(
+                input_image_name=input_image_name,
+                mask_image_name=mask_image_name,
+                denoise=request.denoise,
+                **common_params,
+            )
+        elif request.workflow == WorkflowType.OUTPAINT:
+            assert input_image_name is not None
+            assert mask_image_name is not None
+            return self._outpaint.build(
+                input_image_name=input_image_name,
+                mask_image_name=mask_image_name,
+                denoise=request.denoise,
+                **common_params,
+            )
+        elif request.workflow == WorkflowType.CONTROLNET:
+            assert control_image_name is not None
+            return self._controlnet.build(
+                control_image_name=control_image_name,
+                control_type=request.control_type,
+                controlnet_strength=request.controlnet_strength,
                 **common_params,
             )
         elif request.workflow == WorkflowType.SDXL:

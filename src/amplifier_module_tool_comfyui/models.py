@@ -12,6 +12,10 @@ class WorkflowType(str, Enum):
     TXT2IMG = "txt2img"
     IMG2IMG = "img2img"
     UPSCALE = "upscale"
+    UPSCALE_ESRGAN = "upscale_esrgan"
+    INPAINT = "inpaint"
+    OUTPAINT = "outpaint"
+    CONTROLNET = "controlnet"
     SDXL = "sdxl"
     IP_ADAPTER = "ip_adapter"
 
@@ -70,6 +74,11 @@ class GenerationRequest(BaseModel):
     ip_adapter_weight: float = Field(
         default=1.0, ge=0.0, le=2.0, description="IP-Adapter influence strength"
     )
+    # Upscaler parameters
+    upscaler_model: str = Field(
+        default="RealESRGAN_x4plus.pth",
+        description="Upscaler model for ESRGAN upscaling",
+    )
     workflow: WorkflowType = Field(
         default=WorkflowType.TXT2IMG, description="Workflow type to use"
     )
@@ -77,7 +86,23 @@ class GenerationRequest(BaseModel):
         default=1.0, ge=0.0, le=1.0, description="Denoising strength (for img2img)"
     )
     input_image: str | None = Field(
-        default=None, description="Base64 encoded input image (for img2img)"
+        default=None, description="Base64 encoded input image (for img2img/inpaint)"
+    )
+    mask_image: str | None = Field(
+        default=None,
+        description="Base64 encoded mask image for inpainting (white=generate, black=preserve)",
+    )
+    # ControlNet parameters
+    control_image: str | None = Field(
+        default=None,
+        description="Base64 encoded control image for ControlNet (edges/depth/lines)",
+    )
+    control_type: str = Field(
+        default="canny",
+        description="ControlNet type: canny (edges), depth, or lineart",
+    )
+    controlnet_strength: float = Field(
+        default=1.0, ge=0.0, le=2.0, description="How strongly to follow control image"
     )
     output_format: str = Field(
         default="path", description="Output format: 'path' or 'base64'"

@@ -7,6 +7,10 @@ from .sdxl import SDXLWorkflow
 from .txt2img import Txt2ImgWorkflow
 from .txt2img_lora import Txt2ImgLoRAWorkflow
 from .upscale import UpscaleWorkflow
+from .upscale_esrgan import UpscaleESRGANWorkflow
+from .inpaint import InpaintWorkflow
+from .outpaint import OutpaintWorkflow
+from .controlnet import ControlNetWorkflow
 
 __all__ = [
     "WorkflowBuilder",
@@ -14,6 +18,10 @@ __all__ = [
     "Txt2ImgLoRAWorkflow",
     "Img2ImgWorkflow",
     "UpscaleWorkflow",
+    "UpscaleESRGANWorkflow",
+    "InpaintWorkflow",
+    "OutpaintWorkflow",
+    "ControlNetWorkflow",
     "SDXLWorkflow",
     "IPAdapterWorkflow",
 ]
