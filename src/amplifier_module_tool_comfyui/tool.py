@@ -7,7 +7,14 @@ from amplifier_core import ToolResult
 
 from .client import ComfyUIClient
 from .models import GenerationRequest, WorkflowType
-from .workflows import Img2ImgWorkflow, Txt2ImgWorkflow, UpscaleWorkflow
+from .workflows import (
+    Img2ImgWorkflow,
+    IPAdapterWorkflow,
+    SDXLWorkflow,
+    Txt2ImgLoRAWorkflow,
+    Txt2ImgWorkflow,
+    UpscaleWorkflow,
+)
 
 
 class ComfyUITool:
@@ -44,8 +51,11 @@ class ComfyUITool:
 
         # Workflow builders
         self._txt2img = Txt2ImgWorkflow()
+        self._txt2img_lora = Txt2ImgLoRAWorkflow()
         self._img2img = Img2ImgWorkflow()
         self._upscale = UpscaleWorkflow()
+        self._sdxl = SDXLWorkflow()
+        self._ip_adapter = IPAdapterWorkflow()
 
     @property
     def name(self) -> str:
@@ -55,32 +65,39 @@ class ComfyUITool:
     def description(self) -> str:
         return """Generate images using Stable Diffusion via ComfyUI.
 
-Supports three workflow types:
+Workflow types:
 - txt2img: Generate images from text descriptions
-- img2img: Transform existing images based on prompts
+- img2img: Transform existing images based on prompts  
 - upscale: Upscale images with optional refinement
+- sdxl: High-quality generation at 1024x1024 using SDXL models
+- ip_adapter: Use reference images to guide style/subject
 
-Input parameters:
+Basic parameters:
 - prompt (required): Text description of the desired image
 - negative_prompt: What to avoid (default: "bad quality, blurry, distorted")
-- width: Image width in pixels (default: 512, max: 2048)
-- height: Image height in pixels (default: 512, max: 2048)
-- steps: Sampling steps (default: 20, higher = more detail but slower)
-- cfg_scale: Guidance scale (default: 7.0, higher = follow prompt more strictly)
-- seed: Random seed for reproducibility (omit for random)
-- workflow: "txt2img", "img2img", or "upscale" (default: txt2img)
-- input_image: Base64 encoded image (required for img2img/upscale)
-- denoise: Denoising strength 0-1 (default: 0.75 for img2img, 0.5 for upscale)
-- sampler: Sampling algorithm (default: "euler"). Options: euler, euler_ancestral, heun, dpm_2, dpm_2_ancestral, lms, dpm_fast, dpm_adaptive, dpmpp_2s_ancestral, dpmpp_sde, dpmpp_2m, dpmpp_2m_sde, ddim, uni_pc
-- model: Checkpoint model name (auto-detected if not specified)
+- width/height: Image dimensions (default: 512, or 1024 for SDXL)
+- steps: Sampling steps (default: 20)
+- cfg_scale: Guidance scale (default: 7.0)
+- seed: Random seed for reproducibility
+- sampler: Sampling algorithm (euler, dpmpp_2m, ddim, etc.)
+- model: Checkpoint model name
 
-Returns:
-- images: List of generated image info with filenames
-- prompt_id: Unique ID for this generation
-- If output_format is 'base64', includes image data
+LoRA parameters (works with any workflow):
+- lora_name: LoRA model filename to apply
+- lora_strength: LoRA influence (0-2, default: 1.0)
 
-Example:
-{"prompt": "a majestic mountain at sunset, oil painting style", "steps": 25}"""
+SDXL parameters (workflow: "sdxl"):
+- refiner_model: Optional SDXL refiner for quality boost
+- refiner_start: When to switch to refiner (0-1, default: 0.8)
+
+IP-Adapter parameters (workflow: "ip_adapter"):
+- reference_image: Base64 encoded reference image for style/subject
+- ip_adapter_weight: Reference influence strength (0-2, default: 1.0)
+
+Examples:
+{"prompt": "a majestic mountain at sunset", "steps": 25}
+{"prompt": "portrait in anime style", "lora_name": "anime_style.safetensors", "lora_strength": 0.8}
+{"workflow": "sdxl", "prompt": "photorealistic landscape", "width": 1024, "height": 1024}"""
 
     @property
     def input_schema(self) -> dict[str, Any]:
@@ -131,7 +148,7 @@ Example:
                 "workflow": {
                     "type": "string",
                     "description": "Workflow type",
-                    "enum": ["txt2img", "img2img", "upscale"],
+                    "enum": ["txt2img", "img2img", "upscale", "sdxl", "ip_adapter"],
                     "default": "txt2img",
                 },
                 "input_image": {
@@ -168,6 +185,54 @@ Example:
                         "uni_pc",
                     ],
                     "default": "euler",
+                },
+                # LoRA parameters
+                "lora_name": {
+                    "type": "string",
+                    "description": "LoRA model filename to apply for style/character",
+                },
+                "lora_strength": {
+                    "type": "number",
+                    "description": "LoRA model influence strength",
+                    "default": 1.0,
+                    "minimum": 0.0,
+                    "maximum": 2.0,
+                },
+                "lora_clip_strength": {
+                    "type": "number",
+                    "description": "LoRA CLIP influence strength",
+                    "default": 1.0,
+                    "minimum": 0.0,
+                    "maximum": 2.0,
+                },
+                # SDXL parameters
+                "refiner_model": {
+                    "type": "string",
+                    "description": "SDXL refiner model for quality enhancement",
+                },
+                "refiner_start": {
+                    "type": "number",
+                    "description": "When to switch to refiner (0-1)",
+                    "default": 0.8,
+                    "minimum": 0.0,
+                    "maximum": 1.0,
+                },
+                # IP-Adapter parameters
+                "reference_image": {
+                    "type": "string",
+                    "description": "Base64 encoded reference image for style/subject transfer",
+                },
+                "ip_adapter_model": {
+                    "type": "string",
+                    "description": "IP-Adapter model name",
+                    "default": "ip-adapter_sd15.safetensors",
+                },
+                "ip_adapter_weight": {
+                    "type": "number",
+                    "description": "IP-Adapter influence strength",
+                    "default": 1.0,
+                    "minimum": 0.0,
+                    "maximum": 2.0,
                 },
             },
             "required": ["prompt"],
@@ -213,8 +278,25 @@ Example:
                     )
                 input_image_name = await self._upload_input_image(request.input_image)
 
+            # Handle reference image for IP-Adapter
+            reference_image_name = None
+            if request.workflow == WorkflowType.IP_ADAPTER:
+                if not request.reference_image:
+                    return ToolResult(
+                        success=False,
+                        error={
+                            "message": "reference_image is required for ip_adapter workflow",
+                            "type": "ValidationError",
+                        },
+                    )
+                reference_image_name = await self._upload_input_image(
+                    request.reference_image
+                )
+
             # Build workflow
-            workflow = self._build_workflow(request, model, input_image_name)
+            workflow = self._build_workflow(
+                request, model, input_image_name, reference_image_name
+            )
 
             # Execute generation
             result = await self._client.generate_and_fetch(
@@ -279,14 +361,18 @@ Example:
             else:
                 denoise = 1.0
 
+        # Default width/height for SDXL
+        default_width = 1024 if workflow == WorkflowType.SDXL else 512
+        default_height = 1024 if workflow == WorkflowType.SDXL else 512
+
         return GenerationRequest(
             prompt=input.get("prompt", ""),
             negative_prompt=input.get(
                 "negative_prompt", "bad quality, blurry, distorted"
             ),
-            width=input.get("width", 512),
-            height=input.get("height", 512),
-            steps=input.get("steps", 20),
+            width=input.get("width", default_width),
+            height=input.get("height", default_height),
+            steps=input.get("steps", 25 if workflow == WorkflowType.SDXL else 20),
             cfg_scale=input.get("cfg_scale", 7.0),
             seed=input.get("seed"),
             sampler=input.get("sampler", "euler"),
@@ -296,6 +382,22 @@ Example:
             denoise=denoise,
             input_image=input.get("input_image"),
             output_format=input.get("output_format", self.output_format),
+            # LoRA parameters
+            lora_name=input.get("lora_name"),
+            lora_strength=input.get("lora_strength", 1.0),
+            lora_clip_strength=input.get("lora_clip_strength", 1.0),
+            # SDXL parameters
+            refiner_model=input.get("refiner_model"),
+            refiner_start=input.get("refiner_start", 0.8),
+            # IP-Adapter parameters
+            reference_image=input.get("reference_image"),
+            ip_adapter_model=input.get(
+                "ip_adapter_model", "ip-adapter_sd15.safetensors"
+            ),
+            clip_vision_model=input.get(
+                "clip_vision_model", "CLIP-ViT-H-14-laion2B-s32B-b79K.safetensors"
+            ),
+            ip_adapter_weight=input.get("ip_adapter_weight", 1.0),
         )
 
     async def _resolve_model(self, requested_model: str | None) -> str | None:
@@ -327,6 +429,7 @@ Example:
         request: GenerationRequest,
         model: str,
         input_image_name: str | None,
+        reference_image_name: str | None = None,
     ) -> dict[str, Any]:
         """Build the appropriate workflow based on request."""
         common_params = {
@@ -340,14 +443,30 @@ Example:
             "model": model,
         }
 
+        # Add LoRA params if specified
+        lora_params = {}
+        if request.lora_name:
+            lora_params = {
+                "lora_name": request.lora_name,
+                "lora_strength": request.lora_strength,
+                "lora_clip_strength": request.lora_clip_strength,
+            }
+
         if request.workflow == WorkflowType.TXT2IMG:
+            # Use LoRA workflow if LoRA specified, otherwise standard
+            if request.lora_name:
+                return self._txt2img_lora.build(
+                    width=request.width,
+                    height=request.height,
+                    **common_params,
+                    **lora_params,
+                )
             return self._txt2img.build(
                 width=request.width,
                 height=request.height,
                 **common_params,
             )
         elif request.workflow == WorkflowType.IMG2IMG:
-            # input_image_name is guaranteed to be set (validated earlier)
             assert input_image_name is not None
             return self._img2img.build(
                 input_image_name=input_image_name,
@@ -357,12 +476,32 @@ Example:
                 **common_params,
             )
         elif request.workflow == WorkflowType.UPSCALE:
-            # input_image_name is guaranteed to be set (validated earlier)
             assert input_image_name is not None
             return self._upscale.build(
                 input_image_name=input_image_name,
                 denoise=request.denoise,
                 **common_params,
+            )
+        elif request.workflow == WorkflowType.SDXL:
+            return self._sdxl.build(
+                width=request.width,
+                height=request.height,
+                refiner_model=request.refiner_model,
+                refiner_start=request.refiner_start,
+                **common_params,
+                **lora_params,
+            )
+        elif request.workflow == WorkflowType.IP_ADAPTER:
+            assert reference_image_name is not None
+            return self._ip_adapter.build(
+                width=request.width,
+                height=request.height,
+                reference_image=reference_image_name,
+                ip_adapter_model=request.ip_adapter_model,
+                clip_vision_model=request.clip_vision_model,
+                ip_adapter_weight=request.ip_adapter_weight,
+                **common_params,
+                **lora_params,
             )
         else:
             raise ValueError(f"Unsupported workflow type: {request.workflow}")
