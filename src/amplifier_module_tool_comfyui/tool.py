@@ -71,6 +71,7 @@ Input parameters:
 - workflow: "txt2img", "img2img", or "upscale" (default: txt2img)
 - input_image: Base64 encoded image (required for img2img/upscale)
 - denoise: Denoising strength 0-1 (default: 0.75 for img2img, 0.5 for upscale)
+- sampler: Sampling algorithm (default: "euler"). Options: euler, euler_ancestral, heun, dpm_2, dpm_2_ancestral, lms, dpm_fast, dpm_adaptive, dpmpp_2s_ancestral, dpmpp_sde, dpmpp_2m, dpmpp_2m_sde, ddim, uni_pc
 - model: Checkpoint model name (auto-detected if not specified)
 
 Returns:
@@ -146,6 +147,27 @@ Example:
                 "model": {
                     "type": "string",
                     "description": "Checkpoint model name",
+                },
+                "sampler": {
+                    "type": "string",
+                    "description": "Sampling algorithm",
+                    "enum": [
+                        "euler",
+                        "euler_ancestral",
+                        "heun",
+                        "dpm_2",
+                        "dpm_2_ancestral",
+                        "lms",
+                        "dpm_fast",
+                        "dpm_adaptive",
+                        "dpmpp_2s_ancestral",
+                        "dpmpp_sde",
+                        "dpmpp_2m",
+                        "dpmpp_2m_sde",
+                        "ddim",
+                        "uni_pc",
+                    ],
+                    "default": "euler",
                 },
             },
             "required": ["prompt"],
